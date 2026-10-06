@@ -9,12 +9,17 @@ import numpy as np
 
 st.set_page_config(page_title="Centro de Comando | Rentabilidad", layout="wide", page_icon="🚌")
 
-# --- SISTEMA DE LOGIN ---
-USUARIOS = {"admin": "admin123", "operador": "ahumada2026"}
+# --- SISTEMA DE LOGIN Y ROLES (Punto 14) ---
+# Diccionario: Usuario -> [Contraseña, Rol]
+USUARIOS = {
+    "admin": ["admin123", "administrador"], 
+    "operador": ["ahumada2026", "planificacion"]
+}
 
 if 'logeado' not in st.session_state:
     st.session_state['logeado'] = False
     st.session_state['usuario'] = ""
+    st.session_state['rol'] = ""
 
 if not st.session_state['logeado']:
     st.markdown("<h1 style='text-align: center;'>🚌 Acceso al Sistema</h1>", unsafe_allow_html=True)
@@ -27,17 +32,20 @@ if not st.session_state['logeado']:
             submit = st.form_submit_button("Ingresar")
             
             if submit:
-                if usuario in USUARIOS and USUARIOS[usuario] == password:
+                if usuario in USUARIOS and USUARIOS[usuario][0] == password:
                     st.session_state['logeado'] = True
                     st.session_state['usuario'] = usuario
+                    st.session_state['rol'] = USUARIOS[usuario][1]
                     st.rerun()
                 else:
                     st.error("❌ Usuario o contraseña incorrectos")
     st.stop() 
 
-# --- BASE DE DATOS ---
+# --- BASE DE DATOS (Puntos 2 y 12) ---
 conn = sqlite3.connect('historial_ocupacion.db', check_same_thread=False)
 c = conn.cursor()
+
+# Tabla 1: Historial de Archivos
 c.execute('''
     CREATE TABLE IF NOT EXISTS historial (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +58,19 @@ c.execute('''
         asientos_vendidos INTEGER,
         capacidad INTEGER,
         monto REAL
+    )
+''')
+
+# Tabla 2: Seguimiento de Decisiones (Nuevo Etapa 4)
+c.execute('''
+    CREATE TABLE IF NOT EXISTS decisiones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        folio_viaje TEXT,
+        fecha_registro TEXT,
+        usuario TEXT,
+        accion_tomada TEXT,
+        responsable TEXT,
+        estado TEXT
     )
 ''')
 conn.commit()
@@ -66,7 +87,6 @@ def procesar_ocupacion(df):
     df['Valor de planilla CLP'] = pd.to_numeric(df['Valor de planilla CLP'], errors='coerce').fillna(0).astype(int)
     df['Folio de viaje'] = df['Folio de viaje'].astype(str)
     
-    # Nuevas Columnas Financieras
     df['Ingreso por Pasaje'] = np.where(df['Vendidos'] > 0, df['Valor de planilla CLP'] / df['Vendidos'], 0)
     df['Ingreso por Asiento Total'] = np.where(df['Capacidad'] > 0, df['Valor de planilla CLP'] / df['Capacidad'], 0)
     
@@ -76,7 +96,6 @@ def procesar_ocupacion(df):
     df['Horas Restantes'] = df['Horas Restantes'].fillna(999)
     return df
 
-# ALERTA INTELIGENTE
 def categorizar_accion_inteligente(row):
     pct = row['Pct Numérico']
     horas = row['Horas Restantes']
@@ -112,7 +131,7 @@ def aplicar_color_fila(val):
     return ''
 
 # --- INTERFAZ PRINCIPAL ---
-st.title(f"📊 Centro de Comando - {st.session_state['usuario'].capitalize()}")
+st.title(f"📊 Centro de Comando - {st.session_state['usuario'].capitalize()} (Rol: {st.session_state['rol'].capitalize()})")
 
 archivo_subido = st.file_uploader("📥 Subir Reporte de Ocupación de Terra", type=["xlsx"])
 
@@ -122,7 +141,6 @@ if archivo_subido is not None:
         df_proc = procesar_ocupacion(df_base)
         df_proc['Acción Sugerida'] = df_proc.apply(categorizar_accion_inteligente, axis=1)
         
-        # --- FILTROS GLOBALES ---
         st.sidebar.header("🔍 Filtros Operativos")
         rutas_unicas = df_proc['Ruta'].dropna().unique().tolist()
         ruta_filtro = st.sidebar.multiselect("Rutas", rutas_unicas, default=[])
@@ -133,17 +151,17 @@ if archivo_subido is not None:
         fechas_unicas = sorted(df_proc['Fecha salida'].dropna().unique().tolist())
         fecha_filtro = st.sidebar.multiselect("Fechas", fechas_unicas, default=[])
         
-        # --- FILTROS FINANCIEROS ---
-        st.sidebar.header("💰 Parámetros Económicos")
-        costo_salida = st.sidebar.number_input("Costo Estimado por Salida (CLP)", min_value=0, value=250000, step=10000, 
-                                               help="Ingresa cuánto le cuesta a la empresa operar un viaje promedio (combustible, peajes, sueldos). Sirve para calcular el Punto de Equilibrio.")
+        if st.session_state['rol'] == 'administrador':
+            st.sidebar.header("💰 Parámetros Económicos")
+            costo_salida = st.sidebar.number_input("Costo Estimado por Salida (CLP)", min_value=0, value=250000, step=10000)
+        else:
+            costo_salida = 250000 # Default oculto para operadores
 
         df_hoy = df_proc.copy()
         if ruta_filtro: df_hoy = df_hoy[df_hoy['Ruta'].isin(ruta_filtro)]
         if estado_filtro: df_hoy = df_hoy[df_hoy['Estado de viaje'].isin(estado_filtro)]
         if fecha_filtro: df_hoy = df_hoy[df_hoy['Fecha salida'].isin(fecha_filtro)]
 
-        # --- CÁLCULO DE RENTABILIDAD GLOBAL ---
         df_hoy['Margen Estimado'] = df_hoy['Valor de planilla CLP'] - costo_salida
         df_hoy['Estado Financiero'] = np.where(df_hoy['Margen Estimado'] >= 0, '✅ Rentable', '❌ Pérdida')
 
@@ -157,7 +175,7 @@ if archivo_subido is not None:
         with col_btn1:
             if st.button("💾 Guardar Carga Oficial"):
                 if recent_uploads > 0:
-                    st.warning("⚠️ Ya has guardado un reporte en los últimos 5 minutos. Evitando duplicidad.")
+                    st.warning("⚠️ Ya has guardado un reporte en los últimos 5 minutos.")
                 else:
                     for index, row in df_proc.iterrows():
                         c.execute('''
@@ -196,10 +214,11 @@ if archivo_subido is not None:
             df_cruce['Proyección Cierre (%)'] = ((df_cruce['Proyección Cierre (Vendidos)'] / df_cruce['Capacidad']) * 100).round(1)
 
         # --- PESTAÑAS DE NAVEGACIÓN ---
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Acción Táctica", "💰 Análisis Financiero", "📈 Proyecciones", "⚙️ Simulador Rotativa", "🕒 Agenda por Terminal", "📊 Mapas y Curvas"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Acción Táctica & Tareas", "💰 Análisis Financiero", "📈 Proyecciones", "⚙️ Simulador Rotativa", "🕒 Agenda por Terminal", "📊 Mapas y Curvas"])
 
-        # PESTAÑA 1: TABLA TÁCTICA
+        # PESTAÑA 1: TABLA TÁCTICA Y SEGUIMIENTO DE DECISIONES (Puntos 12 y 13)
         with tab1:
+            st.markdown("### Tabla Táctica de Flota")
             todas_las_columnas = ['Folio de viaje', 'Estado de viaje', 'Fecha salida', 'Hora salida', 'Día de semana', 'Origen (ciudad)', 'Destino (ciudad)', 'Ruta', 'Vendidos', 'Capacidad', 'Asientos Disponibles', 'Horas Restantes', 'Ocupación %', 'Valor de planilla CLP', 'Acción Sugerida']
             if not df_cruce.empty:
                 df_hoy = df_cruce.copy()
@@ -209,14 +228,50 @@ if archivo_subido is not None:
             columnas_ver = st.multiselect("Columnas Visibles", todas_las_columnas, default=columnas_default)
             
             df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
-            
-            # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
             st.dataframe(df_mostrar.style.map(aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []), use_container_width=True, height=400)
 
+            # Botón de Descarga Mejorado (Resumen Ejecutivo)
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Pestaña 1: Resumen Ejecutivo
+                df_ejecutivo = pd.DataFrame({
+                    'Métrica': ['Fecha de Reporte', 'Total Servicios', 'Ocupación Ponderada', 'Recaudación Total'],
+                    'Valor': [hoy_dt.strftime('%d/%m/%Y %H:%M'), total_servicios, f"{ocupacion_ponderada:.1f}%", f"${total_recaudacion:,.0f}"]
+                })
+                df_ejecutivo.to_excel(writer, sheet_name='Resumen Ejecutivo', index=False)
+                # Pestaña 2: Los datos
                 df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
+                
             st.download_button("📥 Exportar Vista Actual (Excel)", data=output.getvalue(), file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+            # Módulo de Decisiones
+            st.markdown("---")
+            st.markdown("### 📝 Registro de Decisiones y Tareas")
+            col_d1, col_d2 = st.columns([1, 2])
+            
+            with col_d1:
+                with st.form("form_decisiones"):
+                    folio_tarea = st.selectbox("Folio:", df_hoy['Folio de viaje'].unique())
+                    accion = st.text_input("Acción a tomar (Ej. Fusionar, Inyectar Bus):")
+                    responsable = st.text_input("Asignar a:")
+                    estado_tarea = st.selectbox("Estado:", ["Pendiente", "En revisión", "Resuelto"])
+                    btn_guardar_tarea = st.form_submit_button("Guardar Decisión")
+                    
+                    if btn_guardar_tarea and accion:
+                        c.execute("INSERT INTO decisiones (folio_viaje, fecha_registro, usuario, accion_tomada, responsable, estado) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (folio_tarea, hoy_dt.strftime('%Y-%m-%d %H:%M'), st.session_state['usuario'], accion, responsable, estado_tarea))
+                        conn.commit()
+                        st.success("Decisión registrada.")
+                        
+            with col_d2:
+                df_decisiones = pd.read_sql_query('SELECT folio_viaje, fecha_registro, accion_tomada, responsable, estado FROM decisiones ORDER BY id DESC LIMIT 10', conn)
+                if not df_decisiones.empty:
+                    st.write("Últimas acciones registradas:")
+                    def color_estado(val):
+                        if val == 'Pendiente': return 'color: red;'
+                        elif val == 'Resuelto': return 'color: green;'
+                        return 'color: orange;'
+                    st.dataframe(df_decisiones.style.map(color_estado, subset=['estado']), use_container_width=True)
 
         # PESTAÑA 2: ANÁLISIS FINANCIERO
         with tab2:
@@ -247,7 +302,6 @@ if archivo_subido is not None:
             def highlight_loss(val):
                 return 'color: red; font-weight: bold;' if isinstance(val, (int, float)) and val < 0 else ''
                 
-            # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
             st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).map(highlight_loss, subset=['Margen Estimado']), use_container_width=True)
 
         # PESTAÑA 3: PROYECCIONES
@@ -260,8 +314,6 @@ if archivo_subido is not None:
                 def highlight_full(val):
                     if isinstance(val, (int, float)) and val >= 95: return 'background-color: #d4edda; color: black; font-weight: bold;'
                     return ''
-                    
-                # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
                 st.dataframe(df_proyeccion.style.map(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
             else:
                 st.info("Necesitas guardar al menos 2 reportes para proyectar el cierre.")
@@ -309,8 +361,6 @@ if archivo_subido is not None:
                     return ''
                     
                 st.write(f"Vista operativa para las salidas desde **{terminal}**:")
-                
-                # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
                 st.dataframe(df_agenda.style.map(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
 
         # PESTAÑA 6: GRÁFICOS Y CURVAS
