@@ -56,17 +56,25 @@ conn.commit()
 
 # --- FUNCIONES DE ANÁLISIS ---
 def procesar_ocupacion(df):
-    """Extrae números puros de la columna 'Ocupación Relativa' Ej: '15/42 (35%)' -> 15 y 42"""
-    # Separar la cadena
+    """Extrae datos exactos de la columna 'Ocupación Relativa' Ej: '1/42 (2.38%)' -> 1, 42 y '2.38%'"""
+    # 1. Separar los asientos vendidos
     temp = df['Ocupación Relativa'].astype(str).str.split('/', n=1, expand=True)
-    df['Asientos Vendidos'] = pd.to_numeric(temp[0], errors='coerce').fillna(0)
+    df['Cantidad de asientos vendidos'] = pd.to_numeric(temp[0], errors='coerce').fillna(0).astype(int)
     
+    # 2. Separar la capacidad del bus
     temp2 = temp[1].str.split(' ', n=1, expand=True)
-    df['Capacidad Bus'] = pd.to_numeric(temp2[0], errors='coerce').fillna(1)
+    df['Capacidad del bus'] = pd.to_numeric(temp2[0], errors='coerce').fillna(1).astype(int)
     
-    df['Asientos Libres'] = df['Capacidad Bus'] - df['Asientos Vendidos']
-    df['% Ocupación'] = (df['Asientos Vendidos'] / df['Capacidad Bus']) * 100
-    df['Monto sin sobrecargo'] = pd.to_numeric(df['Monto sin sobrecargo'], errors='coerce').fillna(0)
+    # 3. Extraer el porcentaje exacto (lo que está dentro de los paréntesis)
+    df['Ocupación relativa %'] = df['Ocupación Relativa'].str.extract(r'\((.*?)\)')
+    
+    # 4. Crear columnas matemáticas internas (invisibles) para el algoritmo del Semáforo
+    df['Pct Numérico'] = pd.to_numeric(df['Ocupación relativa %'].str.replace('%', ''), errors='coerce').fillna(0)
+    df['Asientos Libres'] = df['Capacidad del bus'] - df['Cantidad de asientos vendidos']
+    
+    # 5. Formatear Valor de planilla y Folio
+    df['Valor de planilla CLP'] = pd.to_numeric(df['Valor de planilla CLP'], errors='coerce').fillna(0).astype(int)
+    df['Folio de viaje'] = df['Folio de viaje'].astype(str) # Se pasa a texto para evitar que se vea con comas ej: 8,399
     
     return df
 
@@ -93,14 +101,14 @@ if archivo_subido is not None:
         # Filtramos solo los viajes activos
         df_hoy = df_hoy[df_hoy['Estado de viaje'] == 'Activo'].copy()
         
-        # Calcular horas faltantes aproximadas para el semáforo (asumiendo formato DD/MM/YYYY y HH:MM)
+        # Calcular horas faltantes aproximadas para el semáforo
         hoy_dt = datetime.now()
         df_hoy['Fecha_Hora_dt'] = pd.to_datetime(df_hoy['Fecha salida'] + ' ' + df_hoy['Hora salida'], format='%d/%m/%Y %H:%M', errors='coerce')
         df_hoy['Horas_Faltantes'] = (df_hoy['Fecha_Hora_dt'] - hoy_dt).dt.total_seconds() / 3600
-        df_hoy['Horas_Faltantes'] = df_hoy['Horas_Faltantes'].fillna(999) # Si hay error, lo tiramos lejos
+        df_hoy['Horas_Faltantes'] = df_hoy['Horas_Faltantes'].fillna(999)
         
-        # Aplicar el semáforo
-        df_hoy['Acción Sugerida'] = df_hoy.apply(lambda row: categorizar_accion(row['% Ocupación'], row['Asientos Libres'], row['Horas_Faltantes']), axis=1)
+        # Aplicar el semáforo basado en el % Numérico extraído
+        df_hoy['Acción Sugerida'] = df_hoy.apply(lambda row: categorizar_accion(row['Pct Numérico'], row['Asientos Libres'], row['Horas_Faltantes']), axis=1)
 
         # 2. Guardar en Base de Datos
         fecha_carga = hoy_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -110,7 +118,7 @@ if archivo_subido is not None:
                     INSERT INTO historial (fecha_carga, usuario, folio_viaje, fecha_salida, hora_salida, ruta, asientos_vendidos, capacidad, monto)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (fecha_carga, st.session_state['usuario'], str(row['Folio de viaje']), str(row['Fecha salida']), 
-                      str(row['Hora salida']), str(row['Ruta']), row['Asientos Vendidos'], row['Capacidad Bus'], row['Monto sin sobrecargo']))
+                      str(row['Hora salida']), str(row['Ruta']), row['Cantidad de asientos vendidos'], row['Capacidad del bus'], row['Valor de planilla CLP']))
             conn.commit()
             st.success("✅ Historial guardado correctamente en la base de datos.")
 
@@ -121,12 +129,11 @@ if archivo_subido is not None:
         df_historial = pd.read_sql_query('SELECT * FROM historial ORDER BY id DESC', conn)
         
         if not df_historial.empty:
-            # Quedarnos con el registro más reciente por folio que NO sea el de hoy exacto (para comparar)
             df_historial_unico = df_historial.drop_duplicates(subset=['folio_viaje'], keep='first')
             
             # Cruzar datos
             df_cruce = pd.merge(df_hoy, df_historial_unico[['folio_viaje', 'asientos_vendidos']], left_on='Folio de viaje', right_on='folio_viaje', how='left')
-            df_cruce['Crecimiento_24h'] = df_cruce['Asientos Vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Asientos Vendidos'])
+            df_cruce['Crecimiento_24h'] = df_cruce['Cantidad de asientos vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Cantidad de asientos vendidos'])
             
             # Mostrar métricas destacadas
             viajes_top = df_cruce.sort_values(by='Crecimiento_24h', ascending=False).head(3)
@@ -136,19 +143,32 @@ if archivo_subido is not None:
                 cols = [col1, col2, col3]
                 with cols[i]:
                     st.metric(label=f"🔥 {row['Ruta'][:20]}... ({row['Fecha salida']})", 
-                              value=f"{int(row['Asientos Vendidos'])} vendidos", 
+                              value=f"{int(row['Cantidad de asientos vendidos'])} vendidos", 
                               delta=f"+{int(row['Crecimiento_24h'])} vs último reporte")
         else:
             st.info("ℹ️ Guarda este primer reporte para que mañana el sistema pueda calcular la velocidad de venta.")
 
-        # 4. Vista de Tabla Táctica
+        # 4. Vista de Tabla Táctica con las Columnas Solicitadas
         st.subheader("📋 Panel de Acción Táctica")
-        columnas_ver = ['Fecha salida', 'Hora salida', 'Ruta', 'Asientos Vendidos', 'Asientos Libres', '% Ocupación', 'Monto sin sobrecargo', 'Acción Sugerida']
         
-        # Formatear la tabla para pantalla
-        df_mostrar = df_hoy[columnas_ver].sort_values(by=['% Ocupación', 'Fecha salida'], ascending=[False, True])
+        # Estas son las columnas exactas que pediste ver
+        columnas_ver = [
+            'Folio de viaje', 
+            'Fecha salida', 
+            'Hora salida', 
+            'Origen (ciudad)', 
+            'Destino (ciudad)', 
+            'Cantidad de asientos vendidos', 
+            'Capacidad del bus', 
+            'Ocupación relativa %', 
+            'Valor de planilla CLP', 
+            'Acción Sugerida'
+        ]
         
-        # AQUÍ ESTÁ LA CORRECCIÓN: usamos map() en lugar de applymap()
+        # Ordenamos los viajes para ver primero los más urgentes y con mayor ocupación
+        df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
+        
+        # Mostrar tabla coloreada
         st.dataframe(df_mostrar.style.map(
             lambda x: 'background-color: #d4edda; color: black;' if 'INYECTAR' in str(x) else ('background-color: #f8d7da; color: black;' if 'RIESGO' in str(x) else ''),
             subset=['Acción Sugerida']
@@ -159,8 +179,11 @@ if archivo_subido is not None:
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_mostrar.to_excel(writer, sheet_name='Acciones Requeridas', index=False)
             
-            # Segunda pestaña: Resumen Financiero
-            df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({'Monto sin sobrecargo': 'sum', 'Asientos Vendidos': 'sum'}).reset_index()
+            # Segunda pestaña: Resumen Financiero basado en Planillas
+            df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({
+                'Valor de planilla CLP': 'sum', 
+                'Cantidad de asientos vendidos': 'sum'
+            }).reset_index()
             df_finanzas.to_excel(writer, sheet_name='Proyección Financiera', index=False)
             
         st.download_button(
