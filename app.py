@@ -72,35 +72,33 @@ def procesar_ocupacion(df):
     df['Horas Restantes'] = df['Horas Restantes'].fillna(999)
     return df
 
-def categorizar_accion(pct):
-    if pct >= 71: return '🟢 ALTA DEMANDA'
-    elif 30 <= pct <= 70: return '🟡 MEDIO (Normal)'
-    else: return '🔴 CRÍTICO (Baja)'
+# ALERTA INTELIGENTE (Punto 8)
+def categorizar_accion_inteligente(row):
+    pct = row['Pct Numérico']
+    horas = row['Horas Restantes']
+    libres = row['Asientos Disponibles']
+    
+    if pct >= 85 and horas > 24: return '🟢 ALTA DEMANDA (Evaluar Refuerzo temprano)'
+    elif pct >= 80 and libres <= 5: return '🟢 ALTA DEMANDA (Lleno inminente)'
+    elif pct <= 20 and horas <= 24: return '🔴 CRÍTICO (Venta frenada - Evaluar Suspensión)'
+    elif pct <= 40 and horas <= 48: return '🔴 CRÍTICO (Baja ocupación próxima a salida)'
+    else: return '🟡 MEDIO (Rendimiento Normal)'
 
 def calcular_proyeccion(row, df_historial):
-    """Motor predictivo simplificado: Estima la ocupación final en base a la velocidad de venta histórica."""
     if df_historial.empty or row['Folio de viaje'] not in df_historial['folio_viaje'].values:
-        return row['Vendidos'] # Sin datos, asume que se queda igual
-        
+        return row['Vendidos']
     hist_folio = df_historial[df_historial['folio_viaje'] == row['Folio de viaje']].sort_values('fecha_carga')
-    
-    # Si hay al menos 2 reportes previos, calculamos el ritmo de venta
     if len(hist_folio) >= 2:
         primer_registro = hist_folio.iloc[0]
         ultimo_registro = hist_folio.iloc[-1]
-        
         tiempo_pasado_horas = (pd.to_datetime(ultimo_registro['fecha_carga']) - pd.to_datetime(primer_registro['fecha_carga'])).total_seconds() / 3600
         ventas_logradas = ultimo_registro['asientos_vendidos'] - primer_registro['asientos_vendidos']
-        
         if tiempo_pasado_horas > 0 and ventas_logradas > 0:
             ritmo_por_hora = ventas_logradas / tiempo_pasado_horas
-            # Aplicamos un freno matemático (factor de desaceleración) para que no proyecte ventas infinitas
-            horas_proyectadas = min(row['Horas Restantes'], 48) # Solo proyectamos máximo a 48 hrs para no exagerar
+            horas_proyectadas = min(row['Horas Restantes'], 48)
             ventas_estimadas_futuras = ritmo_por_hora * horas_proyectadas
-            
             estimacion_final = int(row['Vendidos'] + ventas_estimadas_futuras)
-            return min(estimacion_final, row['Capacidad']) # Nunca puede superar la capacidad del bus
-            
+            return min(estimacion_final, row['Capacidad'])
     return row['Vendidos']
 
 def aplicar_color_fila(val):
@@ -118,7 +116,7 @@ if archivo_subido is not None:
     try:
         df_base = pd.read_excel(archivo_subido, skiprows=1)
         df_proc = procesar_ocupacion(df_base)
-        df_proc['Acción Sugerida'] = df_proc['Pct Numérico'].apply(categorizar_accion)
+        df_proc['Acción Sugerida'] = df_proc.apply(categorizar_accion_inteligente, axis=1)
         
         st.sidebar.header("🔍 Filtros de Búsqueda")
         rutas_unicas = df_proc['Ruta'].dropna().unique().tolist()
@@ -170,7 +168,7 @@ if archivo_subido is not None:
         kpi3.metric("Asientos Disponibles", f"{df_hoy['Asientos Disponibles'].sum()}")
         kpi4.metric("Valor Planilla Total", f"${total_recaudacion:,.0f}".replace(',', '.'))
 
-        # --- PREPARACIÓN HISTÓRICA Y PROYECCIONES ---
+        # --- HISTÓRICOS Y PROYECCIONES ---
         df_historial = pd.read_sql_query('SELECT * FROM historial ORDER BY id DESC', conn)
         df_cruce = pd.DataFrame()
         
@@ -180,17 +178,14 @@ if archivo_subido is not None:
             df_cruce['Crecimiento_Neto'] = df_cruce['Vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Vendidos'])
             hist_pct = (df_cruce['asientos_vendidos'] / df_cruce['capacidad']) * 100
             df_cruce['Var. Pct. Ocupación'] = (df_cruce['Pct Numérico'] - hist_pct.fillna(df_cruce['Pct Numérico'])).round(1)
-            
-            # Ejecutar proyecciones (Fase 1)
             df_cruce['Proyección Cierre (Vendidos)'] = df_cruce.apply(lambda row: calcular_proyeccion(row, df_historial), axis=1)
             df_cruce['Proyección Cierre (%)'] = ((df_cruce['Proyección Cierre (Vendidos)'] / df_cruce['Capacidad']) * 100).round(1)
 
         # --- PESTAÑAS DE NAVEGACIÓN ---
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Acción Táctica", "📈 Proyecciones de Cierre", "📊 Mapas de Calor", "🔍 Análisis por Folio (Curvas)"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Acción Táctica", "📈 Proyecciones", "⚙️ Simulador Rotativa", "🕒 Agenda por Terminal", "📊 Mapas y Curvas"])
 
-        # PESTAÑA 1: TABLA DE ACCIÓN
+        # PESTAÑA 1: TABLA TÁCTICA
         with tab1:
-            st.markdown("Selecciona las columnas que deseas visualizar:")
             todas_las_columnas = ['Folio de viaje', 'Estado de viaje', 'Fecha salida', 'Hora salida', 'Día de semana', 'Origen (ciudad)', 'Destino (ciudad)', 'Ruta', 'Vendidos', 'Capacidad', 'Asientos Disponibles', 'Horas Restantes', 'Ocupación %', 'Valor de planilla CLP', 'Acción Sugerida']
             if not df_cruce.empty:
                 df_hoy = df_cruce.copy()
@@ -207,64 +202,105 @@ if archivo_subido is not None:
                 df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
             st.download_button("📥 Exportar Vista Actual (Excel)", data=output.getvalue(), file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # PESTAÑA 2: PROYECCIONES DE CIERRE (NUEVO FASE 1)
+        # PESTAÑA 2: PROYECCIONES
         with tab2:
             st.markdown("### 🎯 Estimación de Ocupación Final")
-            st.write("Calculado en base a la velocidad de venta histórica de los reportes anteriores.")
             if not df_cruce.empty and 'Proyección Cierre (Vendidos)' in df_cruce.columns:
                 col_proy = ['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Proyección Cierre (Vendidos)', 'Capacidad', 'Ocupación %', 'Proyección Cierre (%)']
                 df_proyeccion = df_cruce[col_proy].sort_values('Proyección Cierre (%)', ascending=False)
                 
-                # Resaltar servicios que proyectan llenarse
                 def highlight_full(val):
                     if isinstance(val, (int, float)) and val >= 95: return 'background-color: #d4edda; color: black; font-weight: bold;'
                     return ''
-                
                 st.dataframe(df_proyeccion.style.map(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
             else:
-                st.info("Necesitas guardar al menos 2 reportes de días distintos para que el motor predictivo pueda calcular la velocidad de venta.")
+                st.info("Necesitas guardar al menos 2 reportes para proyectar el cierre.")
 
-        # PESTAÑA 3: GRÁFICOS INTERACTIVOS
+        # PESTAÑA 3: SIMULADOR DE ROTATIVA (NUEVO FASE 2)
         with tab3:
+            st.markdown("### ⚙️ Simulador de Cambio de Capacidad")
+            st.write("Selecciona un folio para evaluar el impacto de cambiar el tamaño del bus asignado.")
+            
+            folio_simular = st.selectbox("Seleccionar Folio a Simular:", df_hoy['Folio de viaje'].unique(), key='sim_folio')
+            if folio_simular:
+                datos_sim = df_hoy[df_hoy['Folio de viaje'] == folio_simular].iloc[0]
+                
+                col_s1, col_s2, col_s3 = st.columns(3)
+                with col_s1:
+                    st.metric("Asientos Vendidos Actuales", datos_sim['Vendidos'])
+                with col_s2:
+                    st.metric("Capacidad Actual Programada", datos_sim['Capacidad'])
+                with col_s3:
+                    st.metric("Ocupación Actual", f"{datos_sim['Pct Numérico']}%")
+                
+                st.markdown("---")
+                nueva_capacidad = st.slider("Simular Nueva Capacidad del Bus:", min_value=30, max_value=80, value=int(datos_sim['Capacidad']), step=1)
+                
+                if nueva_capacidad != datos_sim['Capacidad']:
+                    nueva_ocupacion = (datos_sim['Vendidos'] / nueva_capacidad) * 100
+                    nuevos_libres = nueva_capacidad - datos_sim['Vendidos']
+                    
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Nueva Ocupación Proyectada", f"{nueva_ocupacion:.1f}%", f"{nueva_ocupacion - datos_sim['Pct Numérico']:.1f}%")
+                    c2.metric("Nuevos Asientos Disponibles", nuevos_libres, f"{nuevos_libres - datos_sim['Asientos Disponibles']} asientos")
+                    
+                    if nueva_ocupacion < 30:
+                        st.error("⚠️ Alerta: Conducir este bus con esta capacidad generará rentabilidad crítica.")
+                    elif nueva_ocupacion > 90:
+                        st.success("✅ Excelente: Maximización de rentabilidad sin riesgo de sobreventa inminente.")
+
+        # PESTAÑA 4: AGENDA POR TERMINAL (NUEVO FASE 2)
+        with tab4:
+            st.markdown("### 🕒 Agenda Diaria de Salidas por Terminal")
+            terminal = st.selectbox("Seleccionar Terminal de Origen:", df_hoy['Origen (ciudad)'].unique())
+            
+            if terminal:
+                df_terminal = df_hoy[df_hoy['Origen (ciudad)'] == terminal].copy()
+                # Agrupar por hora
+                df_agenda = df_terminal.groupby(['Fecha salida', 'Hora salida']).agg(
+                    Salidas=('Folio de viaje', 'count'),
+                    Capacidad_Total=('Capacidad', 'sum'),
+                    Vendidos_Total=('Vendidos', 'sum')
+                ).reset_index()
+                
+                df_agenda['Ocupación Horaria %'] = ((df_agenda['Vendidos_Total'] / df_agenda['Capacidad_Total']) * 100).round(1)
+                df_agenda['Exceso de Plazas Libres'] = df_agenda['Capacidad_Total'] - df_agenda['Vendidos_Total']
+                
+                # Resaltar horarios con demasiados buses vacíos
+                def highlight_exceso(val):
+                    if isinstance(val, (int, float)) and val > 50: return 'background-color: #f8d7da; color: black;' # Rojo si sobran mas de 50 plazas a esa hora
+                    return ''
+                    
+                st.write(f"Vista operativa para las salidas desde **{terminal}**:")
+                st.dataframe(df_agenda.style.map(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
+
+        # PESTAÑA 5: GRÁFICOS Y CURVAS
+        with tab5:
+            st.markdown("### 🔍 Análisis Visual")
             col_g1, col_g2 = st.columns([1, 2])
             with col_g1:
                 resumen_estado = df_hoy['Acción Sugerida'].value_counts().reset_index()
                 resumen_estado.columns = ['Estado', 'Cantidad']
-                color_map = {'🟢 ALTA DEMANDA': '#28a745', '🟡 MEDIO (Normal)': '#ffc107', '🔴 CRÍTICO (Baja)': '#dc3545'}
-                fig_pie = px.pie(resumen_estado, values='Cantidad', names='Estado', hole=0.4, color='Estado', color_discrete_map=color_map, title="Distribución de Rentabilidad")
+                # Ajustamos el regex de colores al nuevo texto de alertas
+                def map_color(estado):
+                    if 'ALTA DEMANDA' in estado: return '#28a745'
+                    if 'MEDIO' in estado: return '#ffc107'
+                    return '#dc3545'
+                colores_pie = [map_color(e) for e in resumen_estado['Estado']]
+                
+                fig_pie = px.pie(resumen_estado, values='Cantidad', names='Estado', hole=0.4, color_discrete_sequence=colores_pie, title="Distribución de Flota")
                 st.plotly_chart(fig_pie, use_container_width=True)
 
             with col_g2:
-                mapa_data = df_hoy.groupby(['Ruta', 'Día de semana']).agg(Total_Vendidos=('Vendidos', 'sum'), Total_Capacidad=('Capacidad', 'sum')).reset_index()
-                mapa_data['Ocupación Promedio %'] = (mapa_data['Total_Vendidos'] / mapa_data['Total_Capacidad']) * 100
-                orden_dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-                mapa_pivot = mapa_data.pivot(index='Ruta', columns='Día de semana', values='Ocupación Promedio %')
-                mapa_pivot = mapa_pivot.reindex(columns=[d for d in orden_dias if d in mapa_pivot.columns])
-                fig_heat = px.imshow(mapa_pivot, labels=dict(x="Día", y="Ruta", color="% Ocupación"), x=mapa_pivot.columns, y=mapa_pivot.index, color_continuous_scale="RdYlGn", aspect="auto", title="Mapa de Calor: Ocupación Promedio")
-                st.plotly_chart(fig_heat, use_container_width=True)
-
-        # PESTAÑA 4: ANÁLISIS HISTÓRICO POR FOLIO (NUEVO FASE 1)
-        with tab4:
-            st.markdown("### 🔍 Curva Histórica de Vendidos por Folio")
-            if not df_historial.empty:
-                folio_buscar = st.selectbox("Selecciona un Folio de Viaje para analizar:", df_hoy['Folio de viaje'].unique())
-                
-                if folio_buscar:
-                    hist_data = df_historial[df_historial['folio_viaje'] == folio_buscar].sort_values('fecha_carga')
-                    if len(hist_data) > 1:
-                        fig_line = px.line(hist_data, x='fecha_carga', y='asientos_vendidos', markers=True, 
-                                           title=f"Evolución de Ventas - Folio {folio_buscar}",
-                                           labels={'fecha_carga': 'Fecha del Reporte', 'asientos_vendidos': 'Asientos Vendidos'})
-                        
-                        # Línea roja de capacidad máxima
-                        cap_max = hist_data['capacidad'].iloc[0]
-                        fig_line.add_hline(y=cap_max, line_dash="dash", line_color="red", annotation_text=f"Capacidad Máxima ({cap_max})")
-                        
-                        st.plotly_chart(fig_line, use_container_width=True)
-                    else:
-                        st.warning(f"Aún no hay suficientes reportes guardados en el historial para trazar la curva del folio {folio_buscar}.")
-            else:
-                st.info("Guarda reportes diariamente para desbloquear las curvas históricas.")
+                if not df_historial.empty:
+                    folio_buscar = st.selectbox("Evolución Histórica de Ventas por Folio:", df_hoy['Folio de viaje'].unique())
+                    if folio_buscar:
+                        hist_data = df_historial[df_historial['folio_viaje'] == folio_buscar].sort_values('fecha_carga')
+                        if len(hist_data) > 1:
+                            fig_line = px.line(hist_data, x='fecha_carga', y='asientos_vendidos', markers=True, title=f"Folio {folio_buscar}")
+                            cap_max = hist_data['capacidad'].iloc[0]
+                            fig_line.add_hline(y=cap_max, line_dash="dash", line_color="red", annotation_text=f"Capacidad ({cap_max})")
+                            st.plotly_chart(fig_line, use_container_width=True)
             
     except Exception as e:
         st.error(f"❌ Error al procesar el archivo: {e}")
