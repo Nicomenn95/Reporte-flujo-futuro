@@ -209,8 +209,9 @@ if archivo_subido is not None:
             columnas_ver = st.multiselect("Columnas Visibles", todas_las_columnas, default=columnas_default)
             
             df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
-            # USANDO APPLYMAP (COMPATIBLE)
-            st.dataframe(df_mostrar.style.applymap(aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []), use_container_width=True, height=400)
+            
+            # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
+            st.dataframe(df_mostrar.style.map(aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []), use_container_width=True, height=400)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -243,11 +244,11 @@ if archivo_subido is not None:
             st.markdown("#### 🚨 Viajes Operando a Pérdida (Bajo el Costo de Salida)")
             df_perdida = df_hoy[df_hoy['Estado Financiero'] == '❌ Pérdida'][['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Valor de planilla CLP', 'Margen Estimado']]
             
-            # USANDO APPLYMAP (COMPATIBLE)
             def highlight_loss(val):
                 return 'color: red; font-weight: bold;' if isinstance(val, (int, float)) and val < 0 else ''
                 
-            st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).applymap(highlight_loss, subset=['Margen Estimado']), use_container_width=True)
+            # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
+            st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).map(highlight_loss, subset=['Margen Estimado']), use_container_width=True)
 
         # PESTAÑA 3: PROYECCIONES
         with tab3:
@@ -256,11 +257,12 @@ if archivo_subido is not None:
                 col_proy = ['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Proyección Cierre (Vendidos)', 'Capacidad', 'Ocupación %', 'Proyección Cierre (%)']
                 df_proyeccion = df_cruce[col_proy].sort_values('Proyección Cierre (%)', ascending=False)
                 
-                # USANDO APPLYMAP (COMPATIBLE)
                 def highlight_full(val):
                     if isinstance(val, (int, float)) and val >= 95: return 'background-color: #d4edda; color: black; font-weight: bold;'
                     return ''
-                st.dataframe(df_proyeccion.style.applymap(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
+                    
+                # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
+                st.dataframe(df_proyeccion.style.map(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
             else:
                 st.info("Necesitas guardar al menos 2 reportes para proyectar el cierre.")
 
@@ -302,13 +304,14 @@ if archivo_subido is not None:
                 df_agenda['Ocupación Horaria %'] = ((df_agenda['Vendidos_Total'] / df_agenda['Capacidad_Total']) * 100).round(1)
                 df_agenda['Exceso de Plazas Libres'] = df_agenda['Capacidad_Total'] - df_agenda['Vendidos_Total']
                 
-                # USANDO APPLYMAP (COMPATIBLE)
                 def highlight_exceso(val):
                     if isinstance(val, (int, float)) and val > 50: return 'background-color: #f8d7da; color: black;'
                     return ''
                     
                 st.write(f"Vista operativa para las salidas desde **{terminal}**:")
-                st.dataframe(df_agenda.style.applymap(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
+                
+                # SOLUCIÓN DEL ERROR: USANDO .map() EN LUGAR DE .applymap()
+                st.dataframe(df_agenda.style.map(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
 
         # PESTAÑA 6: GRÁFICOS Y CURVAS
         with tab6:
