@@ -3,6 +3,8 @@ import pandas as pd
 import sqlite3
 import io
 from datetime import datetime
+import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Centro de Comando | Rentabilidad", layout="wide", page_icon="🚌")
 
@@ -150,58 +152,113 @@ if archivo_subido is not None:
 
         st.divider()
 
-        # --- VELOCIDAD DE VENTA ---
-        st.markdown("### ⚡ Crecimiento vs Última Carga")
+        # --- PREPARACIÓN COMPARATIVA HISTÓRICA ---
         df_historial = pd.read_sql_query('SELECT * FROM historial ORDER BY id DESC', conn)
+        df_cruce = pd.DataFrame()
         
         if not df_historial.empty:
             df_historial_unico = df_historial.drop_duplicates(subset=['folio_viaje'], keep='first')
             df_cruce = pd.merge(df_hoy, df_historial_unico[['folio_viaje', 'asientos_vendidos']], left_on='Folio de viaje', right_on='folio_viaje', how='left')
             df_cruce['Crecimiento_Neto'] = df_cruce['Vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Vendidos'])
-            
-            viajes_top = df_cruce.sort_values(by='Crecimiento_Neto', ascending=False).head(3)
-            col_v1, col_v2, col_v3 = st.columns(3)
-            for i, (idx, row) in enumerate(viajes_top.iterrows()):
-                cols = [col_v1, col_v2, col_v3]
-                with cols[i]:
-                    st.metric(label=f"Folio {row['Folio de viaje']} ({row['Fecha salida']})", 
-                              value=f"{int(row['Vendidos'])} vendidos", 
-                              delta=f"+{int(row['Crecimiento_Neto'])} netos")
-        else:
-            st.info("ℹ️ Guarda el reporte para activar la comparativa histórica.")
 
-        # --- TABLA TÁCTICA EXPANDIDA ---
-        st.markdown("### 📋 Panel de Acción")
-        columnas_ver = [
-            'Folio de viaje', 'Estado de viaje', 'Fecha salida', 'Hora salida', 'Día de semana',
-            'Ruta', 'Vendidos', 'Capacidad', 'Asientos Disponibles', 'Horas Restantes', 
-            'Ocupación %', 'Valor de planilla CLP', 'Acción Sugerida'
-        ]
-        
-        df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
-        
-        st.dataframe(df_mostrar.style.map(
-            aplicar_color_fila, subset=['Acción Sugerida']
-        ), use_container_width=True, height=400)
+        # --- PESTAÑAS DE NAVEGACIÓN (TÁCTICA VS ANÁLISIS) ---
+        tab1, tab2, tab3 = st.tabs(["📋 Panel de Acción Táctica", "📊 Gráficos y Mapas de Calor", "⚡ Evolución de Ventas"])
 
-        # --- EXPORTACIÓN ---
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
+        # PESTAÑA 1: TABLA DE ACCIÓN
+        with tab1:
+            columnas_ver = [
+                'Folio de viaje', 'Estado de viaje', 'Fecha salida', 'Hora salida', 'Día de semana',
+                'Ruta', 'Vendidos', 'Capacidad', 'Asientos Disponibles', 'Horas Restantes', 
+                'Ocupación %', 'Valor de planilla CLP', 'Acción Sugerida'
+            ]
             
-            df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({
-                'Valor de planilla CLP': 'sum', 
-                'Vendidos': 'sum',
-                'Capacidad': 'sum'
-            }).reset_index()
-            df_finanzas.to_excel(writer, sheet_name='Agrupado Financiero', index=False)
+            df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
+            st.dataframe(df_mostrar.style.map(
+                aplicar_color_fila, subset=['Acción Sugerida']
+            ), use_container_width=True, height=400)
+
+            # Exportación de datos
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
+                df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({
+                    'Valor de planilla CLP': 'sum', 'Vendidos': 'sum', 'Capacidad': 'sum'
+                }).reset_index()
+                df_finanzas.to_excel(writer, sheet_name='Agrupado Financiero', index=False)
+                
+            st.download_button(
+                label="📥 Exportar Vista Actual (Excel)",
+                data=output.getvalue(),
+                file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        # PESTAÑA 2: GRÁFICOS INTERACTIVOS
+        with tab2:
+            col_g1, col_g2 = st.columns([1, 2])
             
-        st.download_button(
-            label="📥 Exportar Vista Actual (Excel)",
-            data=output.getvalue(),
-            file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+            # Gráfico 1: Estado de la Flota (Anillo)
+            with col_g1:
+                st.markdown("**Distribución de Rentabilidad**")
+                resumen_estado = df_hoy['Acción Sugerida'].value_counts().reset_index()
+                resumen_estado.columns = ['Estado', 'Cantidad']
+                
+                # Mapeo de colores estricto
+                color_map = {
+                    '🟢 ALTA DEMANDA (Posible Inyección)': '#28a745',
+                    '🟡 MEDIO (Rendimiento Normal)': '#ffc107',
+                    '🔴 CRÍTICO (Baja Ocupación)': '#dc3545'
+                }
+                
+                fig_pie = px.pie(resumen_estado, values='Cantidad', names='Estado', hole=0.4,
+                                 color='Estado', color_discrete_map=color_map)
+                fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            # Gráfico 2: Mapa de Calor (Ruta vs Día)
+            with col_g2:
+                st.markdown("**Mapa de Calor: Ocupación Ponderada por Ruta y Día**")
+                # Agrupamos para sacar el porcentaje real promedio por día y ruta
+                mapa_data = df_hoy.groupby(['Ruta', 'Día de semana']).agg(
+                    Total_Vendidos=('Vendidos', 'sum'),
+                    Total_Capacidad=('Capacidad', 'sum')
+                ).reset_index()
+                mapa_data['Ocupación Promedio %'] = (mapa_data['Total_Vendidos'] / mapa_data['Total_Capacidad']) * 100
+                
+                # Ordenar días lógicamente
+                orden_dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+                mapa_pivot = mapa_data.pivot(index='Ruta', columns='Día de semana', values='Ocupación Promedio %')
+                mapa_pivot = mapa_pivot.reindex(columns=[d for d in orden_dias if d in mapa_pivot.columns])
+                
+                fig_heat = px.imshow(mapa_pivot, 
+                                     labels=dict(x="Día", y="Ruta", color="% Ocupación"),
+                                     x=mapa_pivot.columns, y=mapa_pivot.index,
+                                     color_continuous_scale="RdYlGn", aspect="auto")
+                fig_heat.update_layout(margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+        # PESTAÑA 3: EVOLUCIÓN E HISTÓRICOS
+        with tab3:
+            if not df_historial.empty and not df_cruce.empty:
+                st.markdown("**Top 10 Servicios con Mayor Crecimiento (vs Última Carga)**")
+                # Filtramos los que realmente crecieron
+                viajes_top = df_cruce[df_cruce['Crecimiento_Neto'] > 0].sort_values(by='Crecimiento_Neto', ascending=False).head(10)
+                
+                if not viajes_top.empty:
+                    # Crear etiqueta legible para el gráfico
+                    viajes_top['Etiqueta_Viaje'] = "F: " + viajes_top['Folio de viaje'].astype(str) + " - " + viajes_top['Hora salida']
+                    
+                    fig_bar = px.bar(viajes_top, x='Etiqueta_Viaje', y='Crecimiento_Neto', 
+                                     text='Crecimiento_Neto', color='Crecimiento_Neto',
+                                     color_continuous_scale='Blues',
+                                     labels={'Etiqueta_Viaje': 'Folio y Hora', 'Crecimiento_Neto': 'Nuevos Asientos Vendidos'})
+                    fig_bar.update_traces(textposition='outside')
+                    fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                else:
+                    st.info("No se registraron ventas nuevas significativas comparado con el reporte anterior en los filtros seleccionados.")
+            else:
+                st.info("ℹ️ El análisis de evolución se activará automáticamente después de guardar tu primer reporte.")
             
     except Exception as e:
         st.error(f"❌ Error al procesar el archivo: {e}")
