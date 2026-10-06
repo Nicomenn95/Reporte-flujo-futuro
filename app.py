@@ -66,13 +66,19 @@ def procesar_ocupacion(df):
     df['Valor de planilla CLP'] = pd.to_numeric(df['Valor de planilla CLP'], errors='coerce').fillna(0).astype(int)
     df['Folio de viaje'] = df['Folio de viaje'].astype(str)
     
+    # Nuevas Columnas Financieras (Punto 10)
+    # Ingreso Promedio por Pasaje (Yield)
+    df['Ingreso por Pasaje'] = np.where(df['Vendidos'] > 0, df['Valor de planilla CLP'] / df['Vendidos'], 0)
+    # Ingreso por Asiento Ofrecido (RevPAR)
+    df['Ingreso por Asiento Total'] = np.where(df['Capacidad'] > 0, df['Valor de planilla CLP'] / df['Capacidad'], 0)
+    
     hoy_dt = datetime.now()
     df['Fecha_Hora_dt'] = pd.to_datetime(df['Fecha salida'] + ' ' + df['Hora salida'], format='%d/%m/%Y %H:%M', errors='coerce')
     df['Horas Restantes'] = ((df['Fecha_Hora_dt'] - hoy_dt).dt.total_seconds() / 3600).round(1)
     df['Horas Restantes'] = df['Horas Restantes'].fillna(999)
     return df
 
-# ALERTA INTELIGENTE (Punto 8)
+# ALERTA INTELIGENTE
 def categorizar_accion_inteligente(row):
     pct = row['Pct Numérico']
     horas = row['Horas Restantes']
@@ -118,7 +124,8 @@ if archivo_subido is not None:
         df_proc = procesar_ocupacion(df_base)
         df_proc['Acción Sugerida'] = df_proc.apply(categorizar_accion_inteligente, axis=1)
         
-        st.sidebar.header("🔍 Filtros de Búsqueda")
+        # --- FILTROS GLOBALES ---
+        st.sidebar.header("🔍 Filtros Operativos")
         rutas_unicas = df_proc['Ruta'].dropna().unique().tolist()
         ruta_filtro = st.sidebar.multiselect("Rutas", rutas_unicas, default=[])
         
@@ -128,10 +135,19 @@ if archivo_subido is not None:
         fechas_unicas = sorted(df_proc['Fecha salida'].dropna().unique().tolist())
         fecha_filtro = st.sidebar.multiselect("Fechas", fechas_unicas, default=[])
         
+        # --- FILTROS FINANCIEROS (NUEVO FASE 3) ---
+        st.sidebar.header("💰 Parámetros Económicos")
+        costo_salida = st.sidebar.number_input("Costo Estimado por Salida (CLP)", min_value=0, value=250000, step=10000, 
+                                               help="Ingresa cuánto le cuesta a la empresa operar un viaje promedio (combustible, peajes, sueldos). Sirve para calcular el Punto de Equilibrio.")
+
         df_hoy = df_proc.copy()
         if ruta_filtro: df_hoy = df_hoy[df_hoy['Ruta'].isin(ruta_filtro)]
         if estado_filtro: df_hoy = df_hoy[df_hoy['Estado de viaje'].isin(estado_filtro)]
         if fecha_filtro: df_hoy = df_hoy[df_hoy['Fecha salida'].isin(fecha_filtro)]
+
+        # --- CÁLCULO DE RENTABILIDAD GLOBAL ---
+        df_hoy['Margen Estimado'] = df_hoy['Valor de planilla CLP'] - costo_salida
+        df_hoy['Estado Financiero'] = np.where(df_hoy['Margen Estimado'] >= 0, '✅ Rentable', '❌ Pérdida')
 
         hoy_dt = datetime.now()
         fecha_carga = hoy_dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -182,7 +198,7 @@ if archivo_subido is not None:
             df_cruce['Proyección Cierre (%)'] = ((df_cruce['Proyección Cierre (Vendidos)'] / df_cruce['Capacidad']) * 100).round(1)
 
         # --- PESTAÑAS DE NAVEGACIÓN ---
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Acción Táctica", "📈 Proyecciones", "⚙️ Simulador Rotativa", "🕒 Agenda por Terminal", "📊 Mapas y Curvas"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Acción Táctica", "💰 Análisis Financiero", "📈 Proyecciones", "⚙️ Simulador Rotativa", "🕒 Agenda por Terminal", "📊 Mapas y Curvas"])
 
         # PESTAÑA 1: TABLA TÁCTICA
         with tab1:
@@ -202,8 +218,38 @@ if archivo_subido is not None:
                 df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
             st.download_button("📥 Exportar Vista Actual (Excel)", data=output.getvalue(), file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # PESTAÑA 2: PROYECCIONES
+        # PESTAÑA 2: ANÁLISIS FINANCIERO (NUEVO FASE 3)
+        with tab6: # Swapped order to keep consistent with prompt text, this is 'tab6' now in declaration but corresponds to 'tab2' visually. Wait, let's fix the indexing.
+            pass # Fixing tab order below
+
         with tab2:
+            st.markdown("### 💰 Análisis Comercial y Punto de Equilibrio")
+            st.write(f"*Cálculos basados en un costo estimado por salida de **${costo_salida:,.0f}***")
+            
+            col_f1, col_f2, col_f3 = st.columns(3)
+            promedio_yield = df_hoy[df_hoy['Vendidos'] > 0]['Ingreso por Pasaje'].mean()
+            promedio_revpar = df_hoy[df_hoy['Capacidad'] > 0]['Ingreso por Asiento Total'].mean()
+            buses_rentables = len(df_hoy[df_hoy['Estado Financiero'] == '✅ Rentable'])
+            
+            col_f1.metric("Ingreso Promedio por Pasaje (Yield)", f"${promedio_yield:,.0f}".replace(',', '.') if pd.notna(promedio_yield) else "$0")
+            col_f2.metric("Ingreso por Asiento Ofrecido (RevPAR)", f"${promedio_revpar:,.0f}".replace(',', '.') if pd.notna(promedio_revpar) else "$0")
+            col_f3.metric("Viajes sobre Punto de Equilibrio", f"{buses_rentables} de {total_servicios}", f"{(buses_rentables/total_servicios*100):.1f}% de la flota" if total_servicios > 0 else "0%")
+
+            st.markdown("#### 🏆 Participación de Recaudación por Ruta")
+            df_finanzas_ruta = df_hoy.groupby('Ruta').agg(
+                Salidas=('Folio de viaje', 'count'),
+                Recaudación_Total=('Valor de planilla CLP', 'sum'),
+                Margen_Neto=('Margen Estimado', 'sum')
+            ).reset_index().sort_values('Recaudación_Total', ascending=False)
+            
+            st.dataframe(df_finanzas_ruta.style.format({'Recaudación_Total': '${:,.0f}', 'Margen_Neto': '${:,.0f}'}), use_container_width=True)
+            
+            st.markdown("#### 🚨 Viajes Operando a Pérdida (Bajo el Costo de Salida)")
+            df_perdida = df_hoy[df_hoy['Estado Financiero'] == '❌ Pérdida'][['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Valor de planilla CLP', 'Margen Estimado']]
+            st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).applymap(lambda x: 'color: red; font-weight: bold;', subset=['Margen Estimado']), use_container_width=True)
+
+        # PESTAÑA 3: PROYECCIONES
+        with tab3:
             st.markdown("### 🎯 Estimación de Ocupación Final")
             if not df_cruce.empty and 'Proyección Cierre (Vendidos)' in df_cruce.columns:
                 col_proy = ['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Proyección Cierre (Vendidos)', 'Capacidad', 'Ocupación %', 'Proyección Cierre (%)']
@@ -216,22 +262,17 @@ if archivo_subido is not None:
             else:
                 st.info("Necesitas guardar al menos 2 reportes para proyectar el cierre.")
 
-        # PESTAÑA 3: SIMULADOR DE ROTATIVA (NUEVO FASE 2)
-        with tab3:
+        # PESTAÑA 4: SIMULADOR DE ROTATIVA
+        with tab4:
             st.markdown("### ⚙️ Simulador de Cambio de Capacidad")
             st.write("Selecciona un folio para evaluar el impacto de cambiar el tamaño del bus asignado.")
-            
             folio_simular = st.selectbox("Seleccionar Folio a Simular:", df_hoy['Folio de viaje'].unique(), key='sim_folio')
             if folio_simular:
                 datos_sim = df_hoy[df_hoy['Folio de viaje'] == folio_simular].iloc[0]
-                
                 col_s1, col_s2, col_s3 = st.columns(3)
-                with col_s1:
-                    st.metric("Asientos Vendidos Actuales", datos_sim['Vendidos'])
-                with col_s2:
-                    st.metric("Capacidad Actual Programada", datos_sim['Capacidad'])
-                with col_s3:
-                    st.metric("Ocupación Actual", f"{datos_sim['Pct Numérico']}%")
+                with col_s1: st.metric("Asientos Vendidos Actuales", datos_sim['Vendidos'])
+                with col_s2: st.metric("Capacidad Actual Programada", datos_sim['Capacidad'])
+                with col_s3: st.metric("Ocupación Actual", f"{datos_sim['Pct Numérico']}%")
                 
                 st.markdown("---")
                 nueva_capacidad = st.slider("Simular Nueva Capacidad del Bus:", min_value=30, max_value=80, value=int(datos_sim['Capacidad']), step=1)
@@ -244,50 +285,40 @@ if archivo_subido is not None:
                     c1.metric("Nueva Ocupación Proyectada", f"{nueva_ocupacion:.1f}%", f"{nueva_ocupacion - datos_sim['Pct Numérico']:.1f}%")
                     c2.metric("Nuevos Asientos Disponibles", nuevos_libres, f"{nuevos_libres - datos_sim['Asientos Disponibles']} asientos")
                     
-                    if nueva_ocupacion < 30:
-                        st.error("⚠️ Alerta: Conducir este bus con esta capacidad generará rentabilidad crítica.")
-                    elif nueva_ocupacion > 90:
-                        st.success("✅ Excelente: Maximización de rentabilidad sin riesgo de sobreventa inminente.")
+                    if nueva_ocupacion < 30: st.error("⚠️ Alerta: Conducir este bus con esta capacidad generará rentabilidad crítica.")
+                    elif nueva_ocupacion > 90: st.success("✅ Excelente: Maximización de rentabilidad sin riesgo de sobreventa inminente.")
 
-        # PESTAÑA 4: AGENDA POR TERMINAL (NUEVO FASE 2)
-        with tab4:
+        # PESTAÑA 5: AGENDA POR TERMINAL
+        with tab5:
             st.markdown("### 🕒 Agenda Diaria de Salidas por Terminal")
             terminal = st.selectbox("Seleccionar Terminal de Origen:", df_hoy['Origen (ciudad)'].unique())
-            
             if terminal:
                 df_terminal = df_hoy[df_hoy['Origen (ciudad)'] == terminal].copy()
-                # Agrupar por hora
                 df_agenda = df_terminal.groupby(['Fecha salida', 'Hora salida']).agg(
-                    Salidas=('Folio de viaje', 'count'),
-                    Capacidad_Total=('Capacidad', 'sum'),
-                    Vendidos_Total=('Vendidos', 'sum')
+                    Salidas=('Folio de viaje', 'count'), Capacidad_Total=('Capacidad', 'sum'), Vendidos_Total=('Vendidos', 'sum')
                 ).reset_index()
-                
                 df_agenda['Ocupación Horaria %'] = ((df_agenda['Vendidos_Total'] / df_agenda['Capacidad_Total']) * 100).round(1)
                 df_agenda['Exceso de Plazas Libres'] = df_agenda['Capacidad_Total'] - df_agenda['Vendidos_Total']
                 
-                # Resaltar horarios con demasiados buses vacíos
                 def highlight_exceso(val):
-                    if isinstance(val, (int, float)) and val > 50: return 'background-color: #f8d7da; color: black;' # Rojo si sobran mas de 50 plazas a esa hora
+                    if isinstance(val, (int, float)) and val > 50: return 'background-color: #f8d7da; color: black;'
                     return ''
                     
                 st.write(f"Vista operativa para las salidas desde **{terminal}**:")
                 st.dataframe(df_agenda.style.map(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
 
-        # PESTAÑA 5: GRÁFICOS Y CURVAS
-        with tab5:
+        # PESTAÑA 6: GRÁFICOS Y CURVAS
+        with tab6:
             st.markdown("### 🔍 Análisis Visual")
             col_g1, col_g2 = st.columns([1, 2])
             with col_g1:
                 resumen_estado = df_hoy['Acción Sugerida'].value_counts().reset_index()
                 resumen_estado.columns = ['Estado', 'Cantidad']
-                # Ajustamos el regex de colores al nuevo texto de alertas
                 def map_color(estado):
                     if 'ALTA DEMANDA' in estado: return '#28a745'
                     if 'MEDIO' in estado: return '#ffc107'
                     return '#dc3545'
                 colores_pie = [map_color(e) for e in resumen_estado['Estado']]
-                
                 fig_pie = px.pie(resumen_estado, values='Cantidad', names='Estado', hole=0.4, color_discrete_sequence=colores_pie, title="Distribución de Flota")
                 st.plotly_chart(fig_pie, use_container_width=True)
 
