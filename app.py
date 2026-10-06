@@ -66,10 +66,8 @@ def procesar_ocupacion(df):
     df['Valor de planilla CLP'] = pd.to_numeric(df['Valor de planilla CLP'], errors='coerce').fillna(0).astype(int)
     df['Folio de viaje'] = df['Folio de viaje'].astype(str)
     
-    # Nuevas Columnas Financieras (Punto 10)
-    # Ingreso Promedio por Pasaje (Yield)
+    # Nuevas Columnas Financieras
     df['Ingreso por Pasaje'] = np.where(df['Vendidos'] > 0, df['Valor de planilla CLP'] / df['Vendidos'], 0)
-    # Ingreso por Asiento Ofrecido (RevPAR)
     df['Ingreso por Asiento Total'] = np.where(df['Capacidad'] > 0, df['Valor de planilla CLP'] / df['Capacidad'], 0)
     
     hoy_dt = datetime.now()
@@ -135,7 +133,7 @@ if archivo_subido is not None:
         fechas_unicas = sorted(df_proc['Fecha salida'].dropna().unique().tolist())
         fecha_filtro = st.sidebar.multiselect("Fechas", fechas_unicas, default=[])
         
-        # --- FILTROS FINANCIEROS (NUEVO FASE 3) ---
+        # --- FILTROS FINANCIEROS ---
         st.sidebar.header("💰 Parámetros Económicos")
         costo_salida = st.sidebar.number_input("Costo Estimado por Salida (CLP)", min_value=0, value=250000, step=10000, 
                                                help="Ingresa cuánto le cuesta a la empresa operar un viaje promedio (combustible, peajes, sueldos). Sirve para calcular el Punto de Equilibrio.")
@@ -211,17 +209,15 @@ if archivo_subido is not None:
             columnas_ver = st.multiselect("Columnas Visibles", todas_las_columnas, default=columnas_default)
             
             df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
-            st.dataframe(df_mostrar.style.map(aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []), use_container_width=True, height=400)
+            # USANDO APPLYMAP (COMPATIBLE)
+            st.dataframe(df_mostrar.style.applymap(aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []), use_container_width=True, height=400)
 
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
             st.download_button("📥 Exportar Vista Actual (Excel)", data=output.getvalue(), file_name=f"Reporte_Ocupacion_{hoy_dt.strftime('%d%m%Y_%H%M')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # PESTAÑA 2: ANÁLISIS FINANCIERO (NUEVO FASE 3)
-        with tab6: # Swapped order to keep consistent with prompt text, this is 'tab6' now in declaration but corresponds to 'tab2' visually. Wait, let's fix the indexing.
-            pass # Fixing tab order below
-
+        # PESTAÑA 2: ANÁLISIS FINANCIERO
         with tab2:
             st.markdown("### 💰 Análisis Comercial y Punto de Equilibrio")
             st.write(f"*Cálculos basados en un costo estimado por salida de **${costo_salida:,.0f}***")
@@ -246,7 +242,12 @@ if archivo_subido is not None:
             
             st.markdown("#### 🚨 Viajes Operando a Pérdida (Bajo el Costo de Salida)")
             df_perdida = df_hoy[df_hoy['Estado Financiero'] == '❌ Pérdida'][['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Valor de planilla CLP', 'Margen Estimado']]
-            st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).applymap(lambda x: 'color: red; font-weight: bold;', subset=['Margen Estimado']), use_container_width=True)
+            
+            # USANDO APPLYMAP (COMPATIBLE)
+            def highlight_loss(val):
+                return 'color: red; font-weight: bold;' if isinstance(val, (int, float)) and val < 0 else ''
+                
+            st.dataframe(df_perdida.style.format({'Valor de planilla CLP': '${:,.0f}', 'Margen Estimado': '${:,.0f}'}).applymap(highlight_loss, subset=['Margen Estimado']), use_container_width=True)
 
         # PESTAÑA 3: PROYECCIONES
         with tab3:
@@ -255,10 +256,11 @@ if archivo_subido is not None:
                 col_proy = ['Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 'Proyección Cierre (Vendidos)', 'Capacidad', 'Ocupación %', 'Proyección Cierre (%)']
                 df_proyeccion = df_cruce[col_proy].sort_values('Proyección Cierre (%)', ascending=False)
                 
+                # USANDO APPLYMAP (COMPATIBLE)
                 def highlight_full(val):
                     if isinstance(val, (int, float)) and val >= 95: return 'background-color: #d4edda; color: black; font-weight: bold;'
                     return ''
-                st.dataframe(df_proyeccion.style.map(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
+                st.dataframe(df_proyeccion.style.applymap(highlight_full, subset=['Proyección Cierre (%)']), use_container_width=True)
             else:
                 st.info("Necesitas guardar al menos 2 reportes para proyectar el cierre.")
 
@@ -300,12 +302,13 @@ if archivo_subido is not None:
                 df_agenda['Ocupación Horaria %'] = ((df_agenda['Vendidos_Total'] / df_agenda['Capacidad_Total']) * 100).round(1)
                 df_agenda['Exceso de Plazas Libres'] = df_agenda['Capacidad_Total'] - df_agenda['Vendidos_Total']
                 
+                # USANDO APPLYMAP (COMPATIBLE)
                 def highlight_exceso(val):
                     if isinstance(val, (int, float)) and val > 50: return 'background-color: #f8d7da; color: black;'
                     return ''
                     
                 st.write(f"Vista operativa para las salidas desde **{terminal}**:")
-                st.dataframe(df_agenda.style.map(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
+                st.dataframe(df_agenda.style.applymap(highlight_exceso, subset=['Exceso de Plazas Libres']), use_container_width=True)
 
         # PESTAÑA 6: GRÁFICOS Y CURVAS
         with tab6:
