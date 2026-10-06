@@ -26,7 +26,6 @@ if not st.session_state['logeado']:
             submit = st.form_submit_button("Ingresar")
             
             if submit:
-                # AQUÍ ESTÁ LA CORRECCIÓN: usamos 'and' en lugar de 'y'
                 if usuario in USUARIOS and USUARIOS[usuario] == password:
                     st.session_state['logeado'] = True
                     st.session_state['usuario'] = usuario
@@ -148,8 +147,10 @@ if archivo_subido is not None:
         
         # Formatear la tabla para pantalla
         df_mostrar = df_hoy[columnas_ver].sort_values(by=['% Ocupación', 'Fecha salida'], ascending=[False, True])
-        st.dataframe(df_mostrar.style.applymap(
-            lambda x: 'background-color: #d4edda' if 'INYECTAR' in str(x) else ('background-color: #f8d7da' if 'RIESGO' in str(x) else ''),
+        
+        # AQUÍ ESTÁ LA CORRECCIÓN: usamos map() en lugar de applymap()
+        st.dataframe(df_mostrar.style.map(
+            lambda x: 'background-color: #d4edda; color: black;' if 'INYECTAR' in str(x) else ('background-color: #f8d7da; color: black;' if 'RIESGO' in str(x) else ''),
             subset=['Acción Sugerida']
         ), use_container_width=True)
 
