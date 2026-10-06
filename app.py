@@ -119,21 +119,28 @@ if archivo_subido is not None:
         if estado_filtro: df_hoy = df_hoy[df_hoy['Estado de viaje'].isin(estado_filtro)]
         if fecha_filtro: df_hoy = df_hoy[df_hoy['Fecha salida'].isin(fecha_filtro)]
 
-        # --- GUARDADO EN HISTORIAL ---
+        # --- GUARDADO EN HISTORIAL (CON PREVENCIÓN DE DUPLICADOS) ---
         hoy_dt = datetime.now()
         fecha_carga = hoy_dt.strftime('%Y-%m-%d %H:%M:%S')
         
+        # Check for recent identical uploads by this user to prevent spam
+        c.execute("SELECT COUNT(*) FROM historial WHERE usuario = ? AND fecha_carga > datetime('now', '-5 minutes')", (st.session_state['usuario'],))
+        recent_uploads = c.fetchone()[0]
+
         col_btn1, col_btn2 = st.columns([1, 4])
         with col_btn1:
             if st.button("💾 Guardar Carga Oficial"):
-                for index, row in df_proc.iterrows():
-                    c.execute('''
-                        INSERT INTO historial (fecha_carga, usuario, folio_viaje, fecha_salida, hora_salida, ruta, asientos_vendidos, capacidad, monto)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (fecha_carga, st.session_state['usuario'], str(row['Folio de viaje']), str(row['Fecha salida']), 
-                          str(row['Hora salida']), str(row['Ruta']), row['Vendidos'], row['Capacidad'], row['Valor de planilla CLP']))
-                conn.commit()
-                st.success("Carga guardada con éxito.")
+                if recent_uploads > 0:
+                    st.warning("⚠️ Ya has guardado un reporte en los últimos 5 minutos. Evitando duplicidad.")
+                else:
+                    for index, row in df_proc.iterrows():
+                        c.execute('''
+                            INSERT INTO historial (fecha_carga, usuario, folio_viaje, fecha_salida, hora_salida, ruta, asientos_vendidos, capacidad, monto)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (fecha_carga, st.session_state['usuario'], str(row['Folio de viaje']), str(row['Fecha salida']), 
+                              str(row['Hora salida']), str(row['Ruta']), row['Vendidos'], row['Capacidad'], row['Valor de planilla CLP']))
+                    conn.commit()
+                    st.success("✅ Carga guardada con éxito.")
 
         # --- INDICADORES GENERALES (KPIs) ---
         st.markdown("### 📈 Indicadores Globales (Filtro Actual)")
@@ -158,26 +165,47 @@ if archivo_subido is not None:
         
         if not df_historial.empty:
             df_historial_unico = df_historial.drop_duplicates(subset=['folio_viaje'], keep='first')
-            df_cruce = pd.merge(df_hoy, df_historial_unico[['folio_viaje', 'asientos_vendidos']], left_on='Folio de viaje', right_on='folio_viaje', how='left')
+            df_cruce = pd.merge(df_hoy, df_historial_unico[['folio_viaje', 'asientos_vendidos', 'capacidad']], left_on='Folio de viaje', right_on='folio_viaje', how='left')
             df_cruce['Crecimiento_Neto'] = df_cruce['Vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Vendidos'])
+            
+            # Calculate change in occupancy percentage
+            hist_pct = (df_cruce['asientos_vendidos'] / df_cruce['capacidad']) * 100
+            df_cruce['Var. Pct. Ocupación'] = (df_cruce['Pct Numérico'] - hist_pct.fillna(df_cruce['Pct Numérico'])).round(1)
 
-        # --- PESTAÑAS DE NAVEGACIÓN (TÁCTICA VS ANÁLISIS) ---
+        # --- PESTAÑAS DE NAVEGACIÓN ---
         tab1, tab2, tab3 = st.tabs(["📋 Panel de Acción Táctica", "📊 Gráficos y Mapas de Calor", "⚡ Evolución de Ventas"])
 
         # PESTAÑA 1: TABLA DE ACCIÓN
         with tab1:
-            columnas_ver = [
+            st.markdown("Selecciona las columnas que deseas visualizar:")
+            
+            todas_las_columnas = [
                 'Folio de viaje', 'Estado de viaje', 'Fecha salida', 'Hora salida', 'Día de semana',
-                'Ruta', 'Vendidos', 'Capacidad', 'Asientos Disponibles', 'Horas Restantes', 
-                'Ocupación %', 'Valor de planilla CLP', 'Acción Sugerida'
+                'Origen (ciudad)', 'Destino (ciudad)', 'Ruta', 'Vendidos', 'Capacidad', 
+                'Asientos Disponibles', 'Horas Restantes', 'Ocupación %', 'Valor de planilla CLP', 
+                'Acción Sugerida'
             ]
             
+            # Add comparitive columns if available
+            if not df_cruce.empty:
+                df_hoy = df_cruce.copy()
+                todas_las_columnas.extend(['Crecimiento_Neto', 'Var. Pct. Ocupación'])
+            
+            # Default columns to show
+            columnas_default = [
+                'Folio de viaje', 'Fecha salida', 'Hora salida', 'Ruta', 'Vendidos', 
+                'Capacidad', 'Asientos Disponibles', 'Ocupación %', 'Acción Sugerida'
+            ]
+
+            columnas_ver = st.multiselect("Columnas Visibles", todas_las_columnas, default=columnas_default)
+            
             df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
+            
             st.dataframe(df_mostrar.style.map(
-                aplicar_color_fila, subset=['Acción Sugerida']
+                aplicar_color_fila, subset=['Acción Sugerida'] if 'Acción Sugerida' in columnas_ver else []
             ), use_container_width=True, height=400)
 
-            # Exportación de datos
+            # Exportación
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_mostrar.to_excel(writer, sheet_name='Filtro Actual', index=False)
@@ -197,13 +225,11 @@ if archivo_subido is not None:
         with tab2:
             col_g1, col_g2 = st.columns([1, 2])
             
-            # Gráfico 1: Estado de la Flota (Anillo)
             with col_g1:
                 st.markdown("**Distribución de Rentabilidad**")
                 resumen_estado = df_hoy['Acción Sugerida'].value_counts().reset_index()
                 resumen_estado.columns = ['Estado', 'Cantidad']
                 
-                # Mapeo de colores estricto
                 color_map = {
                     '🟢 ALTA DEMANDA (Posible Inyección)': '#28a745',
                     '🟡 MEDIO (Rendimiento Normal)': '#ffc107',
@@ -215,17 +241,14 @@ if archivo_subido is not None:
                 fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-            # Gráfico 2: Mapa de Calor (Ruta vs Día)
             with col_g2:
                 st.markdown("**Mapa de Calor: Ocupación Ponderada por Ruta y Día**")
-                # Agrupamos para sacar el porcentaje real promedio por día y ruta
                 mapa_data = df_hoy.groupby(['Ruta', 'Día de semana']).agg(
                     Total_Vendidos=('Vendidos', 'sum'),
                     Total_Capacidad=('Capacidad', 'sum')
                 ).reset_index()
                 mapa_data['Ocupación Promedio %'] = (mapa_data['Total_Vendidos'] / mapa_data['Total_Capacidad']) * 100
                 
-                # Ordenar días lógicamente
                 orden_dias = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
                 mapa_pivot = mapa_data.pivot(index='Ruta', columns='Día de semana', values='Ocupación Promedio %')
                 mapa_pivot = mapa_pivot.reindex(columns=[d for d in orden_dias if d in mapa_pivot.columns])
@@ -241,11 +264,9 @@ if archivo_subido is not None:
         with tab3:
             if not df_historial.empty and not df_cruce.empty:
                 st.markdown("**Top 10 Servicios con Mayor Crecimiento (vs Última Carga)**")
-                # Filtramos los que realmente crecieron
                 viajes_top = df_cruce[df_cruce['Crecimiento_Neto'] > 0].sort_values(by='Crecimiento_Neto', ascending=False).head(10)
                 
                 if not viajes_top.empty:
-                    # Crear etiqueta legible para el gráfico
                     viajes_top['Etiqueta_Viaje'] = "F: " + viajes_top['Folio de viaje'].astype(str) + " - " + viajes_top['Hora salida']
                     
                     fig_bar = px.bar(viajes_top, x='Etiqueta_Viaje', y='Crecimiento_Neto', 
