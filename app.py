@@ -8,7 +8,6 @@ from datetime import datetime
 st.set_page_config(page_title="Centro de Comando | Rentabilidad", layout="wide", page_icon="🚌")
 
 # --- SISTEMA DE LOGIN BÁSICO ---
-# Credenciales de prueba (En producción se pueden cambiar o encriptar)
 USUARIOS = {"admin": "admin123", "operador": "ahumada2026"}
 
 if 'logeado' not in st.session_state:
@@ -32,10 +31,9 @@ if not st.session_state['logeado']:
                     st.rerun()
                 else:
                     st.error("❌ Usuario o contraseña incorrectos")
-    st.stop() # Detiene la ejecución de la app si no hay login exitoso
+    st.stop() 
 
-# --- CONEXIÓN A BASE DE DATOS (HISTORIAL) ---
-# Crea un archivo local SQLite para guardar el historial
+# --- CONEXIÓN A BASE DE DATOS ---
 conn = sqlite3.connect('historial_ocupacion.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''
@@ -56,27 +54,42 @@ conn.commit()
 
 # --- FUNCIONES DE ANÁLISIS ---
 def procesar_ocupacion(df):
-    """Extrae números puros de la columna 'Ocupación Relativa' Ej: '15/42 (35%)' -> 15 y 42"""
-    # Separar la cadena
+    """Extrae datos exactos de la columna 'Ocupación Relativa'"""
+    # 1. Separar asientos
     temp = df['Ocupación Relativa'].astype(str).str.split('/', n=1, expand=True)
-    df['Asientos Vendidos'] = pd.to_numeric(temp[0], errors='coerce').fillna(0)
+    df['Cantidad de asientos vendidos'] = pd.to_numeric(temp[0], errors='coerce').fillna(0).astype(int)
     
     temp2 = temp[1].str.split(' ', n=1, expand=True)
-    df['Capacidad Bus'] = pd.to_numeric(temp2[0], errors='coerce').fillna(1)
+    df['Capacidad del bus'] = pd.to_numeric(temp2[0], errors='coerce').fillna(1).astype(int)
     
-    df['Asientos Libres'] = df['Capacidad Bus'] - df['Asientos Vendidos']
-    df['% Ocupación'] = (df['Asientos Vendidos'] / df['Capacidad Bus']) * 100
-    df['Monto sin sobrecargo'] = pd.to_numeric(df['Monto sin sobrecargo'], errors='coerce').fillna(0)
+    # 2. Porcentaje Exacto
+    df['Ocupación relativa %'] = df['Ocupación Relativa'].str.extract(r'\((.*?)\)')
+    df['Pct Numérico'] = pd.to_numeric(df['Ocupación relativa %'].str.replace('%', ''), errors='coerce').fillna(0)
+    
+    # 3. Datos Extra
+    df['Valor de planilla CLP'] = pd.to_numeric(df['Valor de planilla CLP'], errors='coerce').fillna(0).astype(int)
+    df['Folio de viaje'] = df['Folio de viaje'].astype(str)
     
     return df
 
-def categorizar_accion(pct, libres, horas_faltantes):
-    if pct >= 85 and libres <= 5:
-        return '🟢 INYECTAR BUS (Alta Demanda)'
-    elif pct <= 25 and horas_faltantes < 48:
-        return '🔴 RIESGO (Evaluar Fusión)'
+def categorizar_accion(pct):
+    """Clasificación estricta de rentabilidad basada en % de ocupación"""
+    if pct >= 71:
+        return '🟢 ALTA DEMANDA (Posible Inyección)'
+    elif 30 <= pct <= 70:
+        return '🟡 MEDIO (Rendimiento Normal)'
     else:
-        return '🟡 NORMAL'
+        return '🔴 CRÍTICO (Baja Ocupación)'
+
+def aplicar_color_fila(val):
+    """Devuelve el estilo CSS para la celda según la alerta"""
+    if 'ALTA DEMANDA' in str(val):
+        return 'background-color: #d4edda; color: black;' # Verde claro
+    elif 'MEDIO' in str(val):
+        return 'background-color: #fff3cd; color: black;' # Amarillo claro
+    elif 'CRÍTICO' in str(val):
+        return 'background-color: #f8d7da; color: black;' # Rojo claro
+    return ''
 
 # --- INTERFAZ DEL DASHBOARD ---
 st.title(f"📊 Centro de Comando de Flota - Hola, {st.session_state['usuario'].capitalize()}")
@@ -86,81 +99,83 @@ archivo_subido = st.file_uploader("📥 Subir Reporte de Ocupación de Terra", t
 
 if archivo_subido is not None:
     try:
-        # 1. Leer y Procesar
+        # 1. Procesamiento Inicial
         df_hoy = pd.read_excel(archivo_subido, skiprows=1)
         df_hoy = procesar_ocupacion(df_hoy)
-        
-        # Filtramos solo los viajes activos
         df_hoy = df_hoy[df_hoy['Estado de viaje'] == 'Activo'].copy()
         
-        # Calcular horas faltantes aproximadas para el semáforo (asumiendo formato DD/MM/YYYY y HH:MM)
-        hoy_dt = datetime.now()
-        df_hoy['Fecha_Hora_dt'] = pd.to_datetime(df_hoy['Fecha salida'] + ' ' + df_hoy['Hora salida'], format='%d/%m/%Y %H:%M', errors='coerce')
-        df_hoy['Horas_Faltantes'] = (df_hoy['Fecha_Hora_dt'] - hoy_dt).dt.total_seconds() / 3600
-        df_hoy['Horas_Faltantes'] = df_hoy['Horas_Faltantes'].fillna(999) # Si hay error, lo tiramos lejos
-        
-        # Aplicar el semáforo
-        df_hoy['Acción Sugerida'] = df_hoy.apply(lambda row: categorizar_accion(row['% Ocupación'], row['Asientos Libres'], row['Horas_Faltantes']), axis=1)
+        # Aplicamos la nueva lógica semáforo
+        df_hoy['Acción Sugerida'] = df_hoy['Pct Numérico'].apply(categorizar_accion)
 
-        # 2. Guardar en Base de Datos
+        hoy_dt = datetime.now()
         fecha_carga = hoy_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # 2. Botón de Guardado
         if st.button("💾 Guardar este reporte en el Historial"):
             for index, row in df_hoy.iterrows():
                 c.execute('''
                     INSERT INTO historial (fecha_carga, usuario, folio_viaje, fecha_salida, hora_salida, ruta, asientos_vendidos, capacidad, monto)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (fecha_carga, st.session_state['usuario'], str(row['Folio de viaje']), str(row['Fecha salida']), 
-                      str(row['Hora salida']), str(row['Ruta']), row['Asientos Vendidos'], row['Capacidad Bus'], row['Monto sin sobrecargo']))
+                      str(row['Hora salida']), str(row['Ruta']), row['Cantidad de asientos vendidos'], row['Capacidad del bus'], row['Valor de planilla CLP']))
             conn.commit()
             st.success("✅ Historial guardado correctamente en la base de datos.")
 
-        # 3. Comparativa con Ayer (Cruzar Folios)
+        # 3. Velocidad de Venta
         st.subheader("⚡ Velocidad de Venta (Comparativa con el último registro)")
-        
-        # Leer el historial de la DB
         df_historial = pd.read_sql_query('SELECT * FROM historial ORDER BY id DESC', conn)
         
         if not df_historial.empty:
-            # Quedarnos con el registro más reciente por folio que NO sea el de hoy exacto (para comparar)
             df_historial_unico = df_historial.drop_duplicates(subset=['folio_viaje'], keep='first')
-            
-            # Cruzar datos
             df_cruce = pd.merge(df_hoy, df_historial_unico[['folio_viaje', 'asientos_vendidos']], left_on='Folio de viaje', right_on='folio_viaje', how='left')
-            df_cruce['Crecimiento_24h'] = df_cruce['Asientos Vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Asientos Vendidos'])
+            df_cruce['Crecimiento_24h'] = df_cruce['Cantidad de asientos vendidos'] - df_cruce['asientos_vendidos'].fillna(df_cruce['Cantidad de asientos vendidos'])
             
-            # Mostrar métricas destacadas
             viajes_top = df_cruce.sort_values(by='Crecimiento_24h', ascending=False).head(3)
             
             col1, col2, col3 = st.columns(3)
             for i, (idx, row) in enumerate(viajes_top.iterrows()):
                 cols = [col1, col2, col3]
                 with cols[i]:
-                    st.metric(label=f"🔥 {row['Ruta'][:20]}... ({row['Fecha salida']})", 
-                              value=f"{int(row['Asientos Vendidos'])} vendidos", 
+                    st.metric(label=f"🔥 {row['Ruta'][:20]}... ({row['Fecha salida']} {row['Hora salida']})", 
+                              value=f"{int(row['Cantidad de asientos vendidos'])} vendidos", 
                               delta=f"+{int(row['Crecimiento_24h'])} vs último reporte")
         else:
             st.info("ℹ️ Guarda este primer reporte para que mañana el sistema pueda calcular la velocidad de venta.")
 
-        # 4. Vista de Tabla Táctica
+        # 4. Tabla Táctica
         st.subheader("📋 Panel de Acción Táctica")
-        columnas_ver = ['Fecha salida', 'Hora salida', 'Ruta', 'Asientos Vendidos', 'Asientos Libres', '% Ocupación', 'Monto sin sobrecargo', 'Acción Sugerida']
         
-        # Formatear la tabla para pantalla
-        df_mostrar = df_hoy[columnas_ver].sort_values(by=['% Ocupación', 'Fecha salida'], ascending=[False, True])
+        columnas_ver = [
+            'Folio de viaje', 
+            'Fecha salida', 
+            'Hora salida', 
+            'Origen (ciudad)', 
+            'Destino (ciudad)', 
+            'Cantidad de asientos vendidos', 
+            'Capacidad del bus', 
+            'Ocupación relativa %', 
+            'Valor de planilla CLP', 
+            'Acción Sugerida'
+        ]
         
-        # AQUÍ ESTÁ LA CORRECCIÓN: usamos map() en lugar de applymap()
+        # Ordenar primero por los críticos
+        df_mostrar = df_hoy[columnas_ver].sort_values(by=['Acción Sugerida', 'Fecha salida'], ascending=[True, True])
+        
+        # Aplicamos los tres colores a la columna de acción
         st.dataframe(df_mostrar.style.map(
-            lambda x: 'background-color: #d4edda; color: black;' if 'INYECTAR' in str(x) else ('background-color: #f8d7da; color: black;' if 'RIESGO' in str(x) else ''),
+            aplicar_color_fila,
             subset=['Acción Sugerida']
         ), use_container_width=True)
 
-        # 5. Generar Excel Táctico Descargable
+        # 5. Exportar a Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_mostrar.to_excel(writer, sheet_name='Acciones Requeridas', index=False)
             
-            # Segunda pestaña: Resumen Financiero
-            df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({'Monto sin sobrecargo': 'sum', 'Asientos Vendidos': 'sum'}).reset_index()
+            df_finanzas = df_hoy.groupby(['Fecha salida', 'Ruta']).agg({
+                'Valor de planilla CLP': 'sum', 
+                'Cantidad de asientos vendidos': 'sum'
+            }).reset_index()
             df_finanzas.to_excel(writer, sheet_name='Proyección Financiera', index=False)
             
         st.download_button(
@@ -173,5 +188,4 @@ if archivo_subido is not None:
     except Exception as e:
         st.error(f"❌ Error al procesar el archivo: {e}")
 
-# Cerrar conexión al terminar
 conn.close()
