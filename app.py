@@ -8,7 +8,7 @@ from datetime import datetime
 st.set_page_config(page_title="Centro de Comando | Rentabilidad", layout="wide", page_icon="🚌")
 
 # --- SISTEMA DE LOGIN BÁSICO ---
-# Credenciales de prueba (En producción se encriptan)
+# Credenciales de prueba (En producción se pueden cambiar o encriptar)
 USUARIOS = {"admin": "admin123", "operador": "ahumada2026"}
 
 if 'logeado' not in st.session_state:
@@ -26,13 +26,14 @@ if not st.session_state['logeado']:
             submit = st.form_submit_button("Ingresar")
             
             if submit:
-                if usuario in USUARIOS y USUARIOS[usuario] == password:
+                # AQUÍ ESTÁ LA CORRECCIÓN: usamos 'and' en lugar de 'y'
+                if usuario in USUARIOS and USUARIOS[usuario] == password:
                     st.session_state['logeado'] = True
                     st.session_state['usuario'] = usuario
                     st.rerun()
                 else:
                     st.error("❌ Usuario o contraseña incorrectos")
-    st.stop() # Detiene la ejecución si no hay login
+    st.stop() # Detiene la ejecución de la app si no hay login exitoso
 
 # --- CONEXIÓN A BASE DE DATOS (HISTORIAL) ---
 # Crea un archivo local SQLite para guardar el historial
